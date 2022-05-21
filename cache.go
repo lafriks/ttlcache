@@ -51,6 +51,11 @@ type Cache[K comparable, V any] struct {
 			nextID uint64
 			fns    map[uint64]func(EvictionReason, *Item[K, V])
 		}
+		clear struct {
+			mu     sync.RWMutex
+			nextID uint64
+			fns    map[uint64]func()
+		}
 	}
 
 	stopCh  chan struct{}
@@ -68,6 +73,7 @@ func New[K comparable, V any](opts ...Option[K, V]) *Cache[K, V] {
 	c.items.timerCh = make(chan time.Duration, 1) // buffer is important
 	c.events.insertion.fns = make(map[uint64]func(*Item[K, V]))
 	c.events.eviction.fns = make(map[uint64]func(EvictionReason, *Item[K, V]))
+	c.events.clear.fns = make(map[uint64]func())
 
 	applyOptions(&c.options, opts...)
 
@@ -298,6 +304,13 @@ func (c *Cache[K, V]) Delete(key K) {
 func (c *Cache[K, V]) DeleteAll() {
 	c.items.mu.Lock()
 	c.evict(EvictionReasonDeleted)
+
+	c.events.clear.mu.RLock()
+	for _, fn := range c.events.clear.fns {
+		fn()
+	}
+	c.events.clear.mu.RUnlock()
+
 	c.items.mu.Unlock()
 }
 
@@ -509,6 +522,44 @@ func (c *Cache[K, V]) OnEviction(fn func(context.Context, EvictionReason, *Item[
 		c.events.eviction.mu.Lock()
 		delete(c.events.eviction.fns, id)
 		c.events.eviction.mu.Unlock()
+
+		wg.Wait()
+	}
+}
+
+// OnClear adds the provided function to be executed when
+// the cache is cleared. The function is executed
+// on a separate goroutine and does not block the flow of the cache
+// manager.
+// The returned function may be called to delete the subscription function
+// from the list of clear subscribers.
+// When the returned function is called, it blocks until all instances of
+// the same subscription function return. A context is used to notify the
+// subscription function when the returned/deletion function is called.
+func (c *Cache[K, V]) OnClear(fn func(context.Context)) func() {
+	var (
+		wg          sync.WaitGroup
+		ctx, cancel = context.WithCancel(context.Background())
+	)
+
+	c.events.clear.mu.Lock()
+	id := c.events.clear.nextID
+	c.events.clear.fns[id] = func() {
+		wg.Add(1)
+		go func() {
+			fn(ctx)
+			wg.Done()
+		}()
+	}
+	c.events.clear.nextID++
+	c.events.clear.mu.Unlock()
+
+	return func() {
+		cancel()
+
+		c.events.clear.mu.Lock()
+		delete(c.events.clear.fns, id)
+		c.events.clear.mu.Unlock()
 
 		wg.Wait()
 	}

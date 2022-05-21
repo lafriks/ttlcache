@@ -91,8 +91,8 @@ func main() {
 }
 ```
 
-To subscribe to insertion and eviction events, `cache.OnInsertion()` and 
-`cache.OnEviction()` methods should be used:
+To subscribe to insertion, eviction and clear events, `cache.OnInsertion()`, 
+`cache.OnEviction()` and `cache.OnClear()` methods should be used:
 ```go
 func main() {
 	cache := ttlcache.New[string, string](
@@ -107,6 +107,9 @@ func main() {
 		if reason == ttlcache.EvictionReasonCapacityReached {
 			fmt.Println(item.Key(), item.Value())
 		}
+	})
+	cache.OnClear(func() {
+		fmt.Println("cache has been cleared")
 	})
 
 	cache.Set("first", "value1", ttlcache.DefaultTTL)

@@ -32,6 +32,7 @@ func Test_New(t *testing.T) {
 	assert.NotNil(t, c.items.timerCh)
 	assert.NotNil(t, c.events.insertion.fns)
 	assert.NotNil(t, c.events.eviction.fns)
+	assert.NotNil(t, c.events.clear.fns)
 	assert.Equal(t, time.Hour, c.options.ttl)
 	assert.Equal(t, uint64(1), c.options.capacity)
 }
@@ -607,6 +608,7 @@ func Test_Cache_DeleteAll(t *testing.T) {
 		key2FnsCalls int
 		key3FnsCalls int
 		key4FnsCalls int
+		clearCalls   int
 	)
 
 	cache := prepCache(time.Hour, "1", "2", "3", "4")
@@ -624,6 +626,10 @@ func Test_Cache_DeleteAll(t *testing.T) {
 		}
 	}
 	cache.events.eviction.fns[2] = cache.events.eviction.fns[1]
+	cache.events.clear.fns[1] = func() {
+		clearCalls++
+	}
+	cache.events.clear.fns[2] = cache.events.clear.fns[1]
 
 	cache.DeleteAll()
 	assert.Empty(t, cache.items.values)
@@ -631,6 +637,7 @@ func Test_Cache_DeleteAll(t *testing.T) {
 	assert.Equal(t, 2, key2FnsCalls)
 	assert.Equal(t, 2, key3FnsCalls)
 	assert.Equal(t, 2, key4FnsCalls)
+	assert.Equal(t, 2, clearCalls)
 }
 
 func Test_Cache_DeleteExpired(t *testing.T) {
@@ -935,6 +942,90 @@ func Test_Cache_OnEviction(t *testing.T) {
 	assert.NotContains(t, cache.events.eviction.fns, uint64(1))
 }
 
+func Test_Cache_OnClear(t *testing.T) {
+	checkCh := make(chan struct{})
+	resCh := make(chan struct{})
+	cache := prepCache(time.Hour)
+	del1 := cache.OnClear(func(_ context.Context) {
+		checkCh <- struct{}{}
+	})
+	del2 := cache.OnClear(func(_ context.Context) {
+		checkCh <- struct{}{}
+	})
+
+	require.Len(t, cache.events.clear.fns, 2)
+	assert.Equal(t, uint64(2), cache.events.clear.nextID)
+
+	cache.events.clear.fns[0]()
+
+	go func() {
+		del1()
+		resCh <- struct{}{}
+	}()
+	assert.Never(t, func() bool {
+		select {
+		case <-resCh:
+			return true
+		default:
+			return false
+		}
+	}, time.Millisecond*200, time.Millisecond*100)
+	assert.Eventually(t, func() bool {
+		select {
+		case <-checkCh:
+			return true
+		default:
+			return false
+		}
+	}, time.Millisecond*500, time.Millisecond*250)
+	assert.Eventually(t, func() bool {
+		select {
+		case <-resCh:
+			return true
+		default:
+			return false
+		}
+	}, time.Millisecond*500, time.Millisecond*250)
+
+	require.Len(t, cache.events.clear.fns, 1)
+	assert.NotContains(t, cache.events.clear.fns, uint64(0))
+	assert.Contains(t, cache.events.clear.fns, uint64(1))
+
+	cache.events.clear.fns[1]()
+
+	go func() {
+		del2()
+		resCh <- struct{}{}
+	}()
+	assert.Never(t, func() bool {
+		select {
+		case <-resCh:
+			return true
+		default:
+			return false
+		}
+	}, time.Millisecond*200, time.Millisecond*100)
+	assert.Eventually(t, func() bool {
+		select {
+		case <-checkCh:
+			return true
+		default:
+			return false
+		}
+	}, time.Millisecond*500, time.Millisecond*250)
+	assert.Eventually(t, func() bool {
+		select {
+		case <-resCh:
+			return true
+		default:
+			return false
+		}
+	}, time.Millisecond*500, time.Millisecond*250)
+
+	assert.Empty(t, cache.events.clear.fns)
+	assert.NotContains(t, cache.events.clear.fns, uint64(1))
+}
+
 func Test_LoaderFunc_Load(t *testing.T) {
 	var called bool
 
@@ -1057,6 +1148,7 @@ func prepCache(ttl time.Duration, keys ...string) *Cache[string, string] {
 	c.items.timerCh = make(chan time.Duration, 1)
 	c.events.eviction.fns = make(map[uint64]func(EvictionReason, *Item[string, string]))
 	c.events.insertion.fns = make(map[uint64]func(*Item[string, string]))
+	c.events.clear.fns = make(map[uint64]func())
 
 	addToCache(c, ttl, keys...)
 
